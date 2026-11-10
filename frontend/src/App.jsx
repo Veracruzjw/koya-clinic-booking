@@ -65,11 +65,7 @@ function App() {
 
       setMessage("Appointment booked successfully!");
       setSlots((previousSlots) =>
-        previousSlots.map((slot) =>
-          slot.id === selectedSlot
-            ? { ...slot, available: false }
-            : slot
-        )
+        previousSlots.filter((slot) => slot.id !== selectedSlot)
       );
       setSelectedSlot("");
       setPatientName("");
