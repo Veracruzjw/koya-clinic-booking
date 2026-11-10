@@ -52,8 +52,8 @@ function App() {
         },
         body: JSON.stringify({
           slot_id: selectedSlot,
-          patient_name: patientName,
-          patient_email: patientEmail,
+          name: patientName,
+          email: patientEmail,
         }),
       });
 

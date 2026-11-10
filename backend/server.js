@@ -11,14 +11,19 @@ const { randomUUID, createHash } = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "https://koya-clinic-web.onrender.com"
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: [
+    "Content-Type",
+    "Idempotency-Key",
+    "X-API-Key"
+  ]
+}));
 
-app.use(
-  cors({
-    origin: "https://koya-clinic-web.onrender.com",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Idempotency-Key"],
-  })
-);
 
 
 app.use(express.json());
@@ -119,14 +124,14 @@ app.get("/public/slots", async (req, res) => {
 
 app.get("/slots", async (req, res) => {
   try {
-    const providerId = req.query.provider_id;
+    const provider = req.query.provider;
 
     const result = await pool.query(
       `SELECT
          s.id,
-         s.provider_id,
-         s.start_time,
-         s.end_time,
+         s.provider_id AS provider,
+         s.start_time AS start,
+         s.end_time AS "end",
          NOT EXISTS (
            SELECT 1
            FROM bookings b
@@ -136,10 +141,10 @@ app.get("/slots", async (req, res) => {
        FROM slots s
        WHERE ($1::text IS NULL OR s.provider_id = $1)
        ORDER BY s.start_time ASC, s.id ASC`,
-      [providerId ?? null]
+      [provider ?? null]
     );
 
-    return res.json({
+    return res.status(200).json({
       slots: result.rows
     });
 
@@ -169,18 +174,18 @@ app.post("/reset", async (req, res) => {
       !slot ||
       typeof slot.id !== "string" ||
       !slot.id.trim() ||
-      typeof slot.provider_id !== "string" ||
-      !slot.provider_id.trim() ||
-      typeof slot.start_time !== "string" ||
-      typeof slot.end_time !== "string"
+      typeof slot.provider !== "string" ||
+      !slot.provider.trim() ||
+      typeof slot.start !== "string" ||
+      typeof slot.end !== "string"
     ) {
       return res.status(400).json({
         error: "Invalid slot details"
       });
     }
 
-    const start = new Date(slot.start_time);
-    const end = new Date(slot.end_time);
+    const start = new Date(slot.start);
+    const end = new Date(slot.end);
 
     if (
       Number.isNaN(start.getTime()) ||
@@ -192,13 +197,15 @@ app.post("/reset", async (req, res) => {
       });
     }
 
-    if (seenIds.has(slot.id)) {
+    const cleanId = slot.id.trim();
+
+    if (seenIds.has(cleanId)) {
       return res.status(400).json({
         error: "Duplicate slot ID"
       });
     }
 
-    seenIds.add(slot.id);
+    seenIds.add(cleanId);
   }
 
   let client;
@@ -208,6 +215,7 @@ app.post("/reset", async (req, res) => {
     await client.query("BEGIN");
 
     await client.query("DELETE FROM booking_idempotency");
+    await client.query("DELETE FROM booking_attempts");
     await client.query("DELETE FROM bookings");
     await client.query("DELETE FROM slots");
 
@@ -218,22 +226,26 @@ app.post("/reset", async (req, res) => {
          VALUES ($1, $2, $3, $4)`,
         [
           slot.id.trim(),
-          slot.provider_id.trim(),
-          slot.start_time,
-          slot.end_time
+          slot.provider.trim(),
+          slot.start,
+          slot.end
         ]
       );
     }
 
     await client.query("COMMIT");
 
-    return res.json({
+    return res.status(200).json({
       message: "Slots reset successfully"
     });
 
   } catch (error) {
     if (client) {
-      await client.query("ROLLBACK");
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Rollback error:", rollbackError.message);
+      }
     }
 
     console.error("Reset error:", error.message);
@@ -248,6 +260,7 @@ app.post("/reset", async (req, res) => {
     }
   }
 });
+
 
 
 
@@ -324,17 +337,54 @@ async function checkBookingRateLimit(email) {
   }
 }
 
+function formatBooking(booking) {
+  return {
+    id: booking.id,
+    slot_id: booking.slot_id,
+    name: booking.patient_name,
+    email: booking.patient_email,
+    status: booking.status,
+    created_at: booking.created_at
+  };
+}
+
+
 
 async function createBooking(req, res) {
-  const { slot_id, patient_name, patient_email } = req.body || {};
+  const { slot_id, name, email } = req.body || {};
+
+  const cleanEmail =
+    typeof email === "string" ? email.trim().toLowerCase() : "";
+
+  // Count attempts with a usable email, even when other
+  // booking details are invalid.
+  if (cleanEmail) {
+    try {
+      const limitResult = await checkBookingRateLimit(cleanEmail);
+
+      if (!limitResult.allowed) {
+        res.set("Retry-After", String(limitResult.retryAfter));
+
+        return res.status(429).json({
+          error: "Too many booking attempts. Please try again later."
+        });
+      }
+    } catch (error) {
+      console.error("Rate limit error:", error.message);
+
+      return res.status(500).json({
+        error: "Failed to check booking rate limit"
+      });
+    }
+  }
 
   if (
     typeof slot_id !== "string" ||
     !slot_id.trim() ||
-    typeof patient_name !== "string" ||
-    !patient_name.trim() ||
-    typeof patient_email !== "string" ||
-    !patient_email.trim()
+    typeof name !== "string" ||
+    !name.trim() ||
+    typeof email !== "string" ||
+    !email.trim()
   ) {
     return res.status(400).json({
       error: "Missing or invalid booking details"
@@ -342,8 +392,7 @@ async function createBooking(req, res) {
   }
 
   const cleanSlotId = slot_id.trim();
-  const cleanName = patient_name.trim();
-  const cleanEmail = patient_email.trim().toLowerCase();
+  const cleanName = name.trim();
 
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -358,31 +407,18 @@ async function createBooking(req, res) {
   const requestHash = createHash("sha256")
     .update(JSON.stringify({
       slot_id: cleanSlotId,
-      patient_name: cleanName,
-      patient_email: cleanEmail
+      name: cleanName,
+      email: cleanEmail
     }))
     .digest("hex");
 
   let client;
 
   try {
-    
-    const rateLimit = await checkBookingRateLimit(cleanEmail);
-
-    if (!rateLimit.allowed) {
-        res.set("Retry-After", String(rateLimit.retryAfter));
-
-        return res.status(429).json({
-            error: "Too many booking attempts. Please try again later."
-        });
-        }
-
     client = await pool.connect();
     await client.query("BEGIN");
 
     if (idempotencyKey) {
-
-      // Lock this key so simultaneous retries cannot race.
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [idempotencyKey]
@@ -407,9 +443,7 @@ async function createBooking(req, res) {
           });
         }
 
-        const { request_hash, ...booking } = original;
-
-        return res.status(200).json({ booking });
+        return res.status(201).json(formatBooking(original));
       }
     }
 
@@ -457,9 +491,7 @@ async function createBooking(req, res) {
 
     await client.query("COMMIT");
 
-    return res.status(201).json({
-      booking: result.rows[0]
-    });
+    return res.status(201).json(formatBooking(result.rows[0]));
 
   } catch (error) {
     if (client) {
@@ -488,17 +520,27 @@ async function createBooking(req, res) {
     }
   }
 }
+app.post("/bookings", createBooking);
 
 app.post("/public/bookings", createBooking);
 
 
+
 app.get("/bookings", async (req, res) => {
   try {
+    const email = req.query.email;
+
+    if (typeof email !== "string" || !email.trim()) {
+      return res.status(400).json({
+        error: "email is required"
+      });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
     const limitText = req.query.limit ?? "10";
     const cursor = req.query.cursor;
 
-    // Allow only whole numbers between 1 and 50.
-    if (!/^\d+$/.test(limitText)) {
+    if (typeof limitText !== "string" || !/^\d+$/.test(limitText)) {
       return res.status(400).json({
         error: "limit must be a whole number between 1 and 50"
       });
@@ -517,6 +559,10 @@ app.get("/bookings", async (req, res) => {
 
     if (cursor !== undefined) {
       try {
+        if (typeof cursor !== "string" || !cursor) {
+          throw new Error("Invalid cursor");
+        }
+
         const decoded = JSON.parse(
           Buffer.from(cursor, "base64url").toString("utf8")
         );
@@ -543,17 +589,21 @@ app.get("/bookings", async (req, res) => {
     const result = await pool.query(
       `SELECT *
        FROM bookings
-       WHERE (
-         $1::timestamptz IS NULL
-         OR (created_at, id) > ($1::timestamptz, $2::text)
-       )
+       WHERE LOWER(patient_email) = $1
+         AND (
+           $2::timestamptz IS NULL
+           OR (date_trunc('milliseconds', created_at), id) >
+            ($2::timestamptz, $3::text)
+         )
        ORDER BY created_at ASC, id ASC
-       LIMIT $3`,
-      [cursorDate, cursorId, limit + 1]
+       LIMIT $4`,
+      [cleanEmail, cursorDate, cursorId, limit + 1]
     );
 
     const hasMore = result.rows.length > limit;
-    const bookings = result.rows.slice(0, limit);
+    const bookings = result.rows
+      .slice(0, limit)
+      .map(formatBooking);
 
     let next_cursor = null;
 
@@ -568,7 +618,7 @@ app.get("/bookings", async (req, res) => {
       ).toString("base64url");
     }
 
-    return res.json({
+    return res.status(200).json({
       bookings,
       next_cursor
     });
@@ -581,6 +631,7 @@ app.get("/bookings", async (req, res) => {
     });
   }
 });
+
 
 
 app.get("/bookings/:id", async (req, res) => {
@@ -598,18 +649,20 @@ app.get("/bookings/:id", async (req, res) => {
       });
     }
 
-    res.json({
-      booking: result.rows[0]
-    });
+    return res.status(200).json(
+      formatBooking(result.rows[0])
+    );
 
   } catch (error) {
     console.error("Error fetching booking:", error.message);
 
-    res.status(500).json({
+    return res.status(500).json({
       error: "Failed to retrieve booking"
     });
   }
 });
+
+
 
 app.delete("/bookings/:id", async (req, res) => {
   try {
@@ -623,24 +676,36 @@ app.delete("/bookings/:id", async (req, res) => {
       [id]
     );
 
-    if (result.rows.length === 0) {
+    if (result.rows.length > 0) {
+      return res.status(200).json(
+        formatBooking(result.rows[0])
+      );
+    }
+
+    const existing = await pool.query(
+      "SELECT status FROM bookings WHERE id = $1",
+      [id]
+    );
+
+    if (existing.rows.length === 0) {
       return res.status(404).json({
-        error: "Confirmed booking not found"
+        error: "Booking not found"
       });
     }
 
-    res.json({
-      booking: result.rows[0]
+    return res.status(409).json({
+      error: "Booking already cancelled"
     });
 
   } catch (error) {
     console.error("Cancellation error:", error.message);
 
-    res.status(500).json({
+    return res.status(500).json({
       error: "Failed to cancel booking"
     });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
