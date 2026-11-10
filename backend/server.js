@@ -2,6 +2,8 @@ const express = require("express");
 
 const pool = require("./db");
 
+const { rateLimit } = require("express-rate-limit");
+
 const { randomUUID, createHash } = require("crypto");
 
 const app = express();
@@ -9,7 +11,30 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+
+const publicBookingLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 5,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    error: "Too many booking requests. Please try again later."
+  }
+});
+
+app.use("/public/bookings", publicBookingLimiter);
+
 app.use((req, res, next) => {
+  const publicSlots =
+    req.method === "GET" && req.path === "/public/slots";
+
+  const publicBooking =
+    req.method === "POST" && req.path === "/public/bookings";
+
+  if (publicSlots || publicBooking) {
+    return next();
+  }
+
   const providedKey = req.header("X-API-Key");
 
   if (!process.env.API_KEY || providedKey !== process.env.API_KEY) {
@@ -20,6 +45,7 @@ app.use((req, res, next) => {
 
   next();
 });
+
 
 app.get("/", (req, res) => {
   res.json({
@@ -46,6 +72,37 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
+
+app.get("/public/slots", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT
+         s.id,
+         s.provider_id,
+         s.start_time,
+         s.end_time
+       FROM slots s
+       WHERE s.start_time > NOW()
+         AND NOT EXISTS (
+           SELECT 1
+           FROM bookings b
+           WHERE b.slot_id = s.id
+             AND b.status = 'confirmed'
+         )
+       ORDER BY s.start_time ASC, s.id ASC`
+    );
+
+    return res.json({
+      slots: result.rows
+    });
+  } catch (error) {
+    console.error("Public slots error:", error.message);
+
+    return res.status(500).json({
+      error: "Failed to retrieve appointments"
+    });
+  }
+});
 
 
 app.get("/slots", async (req, res) => {
@@ -256,7 +313,7 @@ async function checkBookingRateLimit(email) {
 }
 
 
-app.post("/bookings", async (req, res) => {
+async function createBooking(req, res) {
   const { slot_id, patient_name, patient_email } = req.body || {};
 
   if (
@@ -418,7 +475,9 @@ app.post("/bookings", async (req, res) => {
       client.release();
     }
   }
-});
+}
+
+app.post("/public/bookings", createBooking);
 
 
 app.get("/bookings", async (req, res) => {

@@ -12,7 +12,7 @@ function App() {
   useEffect(() => {
     async function loadSlots() {
       try {
-        const response = await fetch("/api/slots");
+        const response = await fetch("/public/slots");
 
         if (!response.ok) {
           throw new Error("Unable to load appointments");
@@ -40,7 +40,7 @@ function App() {
     setMessage("");
 
     try {
-      const response = await fetch("/api/bookings", {
+      const response = await fetch("/public/bookings", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -111,7 +111,6 @@ function App() {
           <div className="grid gap-3 sm:grid-cols-2">
             {!slots.some(
               (slot) =>
-                slot.available &&
                 new Date(slot.start_time).getTime() > Date.now()
             ) && (
               <p className="text-sm text-slate-500">
@@ -120,7 +119,6 @@ function App() {
             )}
 
             {slots.filter((slot) =>
-              slot.available &&
               new Date(slot.start_time).getTime() > Date.now()
             )
             .map((slot) => (
