@@ -4,10 +4,22 @@ const pool = require("./db");
 
 const { rateLimit } = require("express-rate-limit");
 
+const cors = require("cors");
+
 const { randomUUID, createHash } = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+
+app.use(
+  cors({
+    origin: "https://koya-clinic-web.onrender.com",
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Idempotency-Key"],
+  })
+);
+
 
 app.use(express.json());
 
