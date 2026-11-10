@@ -12,7 +12,9 @@ function App() {
   useEffect(() => {
     async function loadSlots() {
       try {
-        const response = await fetch("/public/slots");
+        const response = await fetch(
+          `${import.meta.env.VITE_API_URL}/public/slots`
+        );
 
         if (!response.ok) {
           throw new Error("Unable to load appointments");
@@ -40,7 +42,9 @@ function App() {
     setMessage("");
 
     try {
-      const response = await fetch("/public/bookings", {
+      const response = await fetch(
+        `${import.meta.env.VITE_API_URL}/public/bookings`,
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
